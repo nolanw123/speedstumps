@@ -8,16 +8,14 @@
 //
 // i.e. if we had some logic like:
 //
-// if(x[i] <= y[i]) {
-//   v[i] = a[i];
+// if(a[i] <= b[i]) {
+//   tot += x[i];
 // } else {
-//   v[i] = b[i];
+//   tot += y[i];
 // }
 //
 // we could do this in parallel with simd instructions, and avoid branching entirely
 //
-// note: it may be the case we can speed things up even more by arranging the
-// layouts of x,y,a,b, and v in memory properly
 //
 // the instrinsics corresponding to the "basic idea" above are:
 // https://software.intel.com/sites/landingpage/IntrinsicsGuide/#techs=AVX&expand=486,518,848,848&text=_mm_cmp_ps
@@ -48,7 +46,13 @@ inline float horizontal_add(__m256 &a) {
   return _mm_cvtss_f32(t1);
 }
 
-// 32-bit aligned a/b, and mask array, do selection for count (which must be a multiple of 8)
+inline float horizontal_add(__m128 &a) {
+  a = _mm_hadd_ps(a,a);
+  a = _mm_hadd_ps(a,a);
+  return _mm_cvtss_f32(a);
+}
+
+// 256-bit simd implementation
 float selectf(float *a, float *b, float *x, float *y, size_t count)
 {
   __m256 *ap = (__m256*)a;
@@ -66,22 +70,23 @@ float selectf(float *a, float *b, float *x, float *y, size_t count)
   return horizontal_add(tot) / count;
 }
 
-// 16-bit aligned a/b, mask, and results array, do selection for count (which must be a multiple of 4)
-float selectf2(float *a, float *b, uint32_t *mask, size_t count)
+// 128-bit simd implementation
+float selectf2(float *a, float *b, float *x, float *y, size_t count)
 {
   __m128 *ap = (__m128*)a;
   __m128 *bp = (__m128*)b;
-  __m128 *maskp = (__m128*)mask;
-  __m128 tot;
+  __m128 *xp = (__m128*)x;
+  __m128 *yp = (__m128*)y;  
+  __m128 tot = _mm_setzero_ps();
 
   for(size_t i = 0 ; i < (count >> 2) ; ++i) {
-    __m128 res = _mm_blendv_ps(*ap++, *bp++, *maskp++);
+    __m128 mask = _mm_cmp_ps(*ap++, *bp++, 30); // _CMP_GT_OQ aka > (ie the OPPOSITE of <= because we want an inverse result in the mask)
+    __m128 res = _mm_blendv_ps(*xp++, *yp++, mask);
     tot = _mm_add_ps(tot, res); // vertically accumulate results
   }
-  tot = _mm_hadd_ps(tot, tot); // now horizontally accumulate results
-  tot = _mm_hadd_ps(tot, tot); // need to do 2x because hadd_ps works in pairs
-
-  return VGBI<float, 0>(tot) / count;  
+  
+  return horizontal_add(tot) / count;
+  
 }
 
 // this is the traditional (slow) decision stump evaluation function 
@@ -93,34 +98,6 @@ float selectslow(float *a, float *b, float *x, float *y, size_t count)
       total += x[i];
     } else {
       total += y[i];
-    }
-  }
-  return total / count;
-}
-
-// An attempt to speed up selectslow by grouping the data to improve
-// cache access:
-//   ie: a0,b0,x0,y0,a1,b1,x1,y1 etc
-//
-#pragma pack(push,1)
-//struct alignas(32) selectentry {
-// NOTE: cache use has a huge effect -- doing alignas(32) (which forces the struct to be
-// 32 bytes in size, as well), results in about 4x slower performance, probably due to
-// memory bandwidth constraints
-struct selectentry {
-  float a,b,x,y;
-};
-static_assert(sizeof(selectentry) == 16, "Size of selectentry is not 16 bytes");
-#pragma pack(pop)
-  
-float selectlessslow(selectentry *entries, size_t count)
-{
-  float total = 0.0;
-  for(size_t i = 0 ; i < count ; ++i) {    
-    if(entries[i].a <= entries[i].b) {
-      total += entries[i].x;
-    } else {
-      total += entries[i].y;
     }
   }
   return total / count;
@@ -173,7 +150,6 @@ int main(int argc, char **argv)
   __m256 *b = new __m256[COUNT/8];  
   __m256 *x = new __m256[COUNT/8];
   __m256 *y = new __m256[COUNT/8];
-  selectentry *entries = new selectentry[COUNT];
   selectf2_2_entry *entries2 = new selectf2_2_entry[COUNT/4]; // /4 because using __m128 internally
 
   std::mt19937_64 g(1234);      // mersenne twister with constant seed for reproducibility
@@ -182,22 +158,18 @@ int main(int argc, char **argv)
     {
       float vals[8] = { d(g), d(g), d(g), d(g), d(g), d(g), d(g), d(g) };
       a[i] = _mm256_set_ps(vals[0], vals[1], vals[2], vals[3], vals[4], vals[5], vals[6], vals[7]);
-      for(size_t j = 0 ; j < 8 ; ++j) entries[(i * 8) + j].a = vals[j];
     }
     {
       float vals[8] = { d(g), d(g), d(g), d(g), d(g), d(g), d(g), d(g) };
       b[i] = _mm256_set_ps(vals[0], vals[1], vals[2], vals[3], vals[4], vals[5], vals[6], vals[7]);
-      for(size_t j = 0 ; j < 8 ; ++j) entries[(i * 8) + j].b = vals[j];
     }
     {
       float vals[8] = { d(g), d(g), d(g), d(g), d(g), d(g), d(g), d(g) };
       x[i] = _mm256_set_ps(vals[0], vals[1], vals[2], vals[3], vals[4], vals[5], vals[6], vals[7]);
-      for(size_t j = 0 ; j < 8 ; ++j) entries[(i * 8) + j].x = vals[j];
     }
     {
       float vals[8] = { d(g), d(g), d(g), d(g), d(g), d(g), d(g), d(g) };
       y[i] = _mm256_set_ps(vals[0], vals[1], vals[2], vals[3], vals[4], vals[5], vals[6], vals[7]);
-      for(size_t j = 0 ; j < 8 ; ++j) entries[(i * 8) + j].y = vals[j];
     }    
   }
     
@@ -218,9 +190,8 @@ int main(int argc, char **argv)
   };
 
   timer([&](){ return selectslow(&a[0][0],&b[0][0],&x[0][0],&y[0][0],COUNT); }, TRIALS, "selectslow");
-  timer([&](){ return selectlessslow(&entries[0],COUNT); }, TRIALS, "selectlessslow");    
   timer([&](){ return selectf(&a[0][0],&b[0][0],&x[0][0],&y[0][0],COUNT); }, TRIALS, "selectf");
-  timer([&](){ return selectf2(&a[0][0],&b[0][0],(uint32_t*)(&mask[0][0]),COUNT); }, TRIALS, "selectf2");
+  timer([&](){ return selectf2(&a[0][0],&b[0][0],&x[0][0],&y[0][0],COUNT); }, TRIALS, "selectf2");
   timer([&](){ return selectf2_2(&entries2[0],COUNT); }, TRIALS, "selectf2_2");
 
   return 0;

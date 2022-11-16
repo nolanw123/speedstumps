@@ -40,24 +40,30 @@
 
 #include "util.h"
 
+inline float horizontal_add(__m256 &a) {
+  a = _mm256_hadd_ps(a,a);
+  a = _mm256_hadd_ps(a, a);
+  __m128 t1 = _mm256_extractf128_ps(a,1);
+  t1 = _mm_add_ss(_mm256_castps256_ps128(a),t1);
+  return _mm_cvtss_f32(t1);
+}
+
 // 32-bit aligned a/b, and mask array, do selection for count (which must be a multiple of 8)
-float selectf(float *a, float *b, uint32_t *mask, size_t count)
+float selectf(float *a, float *b, float *x, float *y, size_t count)
 {
   __m256 *ap = (__m256*)a;
   __m256 *bp = (__m256*)b;
-  __m256 *maskp = (__m256*)mask;
-  __m256 tot;
+  __m256 *xp = (__m256*)x;
+  __m256 *yp = (__m256*)y;  
+  __m256 tot = _mm256_setzero_ps();
 
   for(size_t i = 0 ; i < (count >> 3) ; ++i) {
-    __m256 res = _mm256_blendv_ps(*ap++, *bp++, *maskp++);
+    __m256 mask = _mm256_cmp_ps(*ap++, *bp++, 30); // _CMP_GT_OQ aka > (ie the OPPOSITE of <= because we want an inverse result in the mask)
+    __m256 res = _mm256_blendv_ps(*xp++, *yp++, mask);
     tot = _mm256_add_ps(tot, res); // vertically accumulate results
   }
-  tot = _mm256_hadd_ps(tot, tot); // now horizontally accumulate results
-  tot = _mm256_hadd_ps(tot, tot); // need to do 4x because hadd_ps works in pairs
-  tot = _mm256_hadd_ps(tot, tot);
-  tot = _mm256_hadd_ps(tot, tot);
   
-  return VGBI<float, 0>(tot) / count;
+  return horizontal_add(tot) / count;
 }
 
 // 16-bit aligned a/b, mask, and results array, do selection for count (which must be a multiple of 4)
@@ -213,7 +219,7 @@ int main(int argc, char **argv)
 
   timer([&](){ return selectslow(&a[0][0],&b[0][0],&x[0][0],&y[0][0],COUNT); }, TRIALS, "selectslow");
   timer([&](){ return selectlessslow(&entries[0],COUNT); }, TRIALS, "selectlessslow");    
-  timer([&](){ return selectf(&a[0][0],&b[0][0],(uint32_t*)(&mask[0][0]),COUNT); }, TRIALS, "selectf");
+  timer([&](){ return selectf(&a[0][0],&b[0][0],&x[0][0],&y[0][0],COUNT); }, TRIALS, "selectf");
   timer([&](){ return selectf2(&a[0][0],&b[0][0],(uint32_t*)(&mask[0][0]),COUNT); }, TRIALS, "selectf2");
   timer([&](){ return selectf2_2(&entries2[0],COUNT); }, TRIALS, "selectf2_2");
 

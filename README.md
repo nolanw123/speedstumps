@@ -54,3 +54,6 @@ Running tests on 800000 elements
 `selectslow` is the baseline evaluation function.  We get about a 6x speedup for the 256-bit `selectf` variant.  For completeness' sake we also implement the 128-bit version as `selectf2`.
 
 Given that the theoretical max bandwith increase we could achieve is 8x (256 bits / 32 bits per float) a value over 6x seems reasonable.  Since each core has SIMD units, theoretically evaluating groups of stumps in parallel should further boost evaluation throughput.
+
+Note that it is likely possible to take a similar approach to depth=2 trees, at the expense of bandwidth -- the benefit being of more complex
+models being useable.

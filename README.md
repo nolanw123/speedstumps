@@ -1,6 +1,6 @@
 # Speeding Up Decision Stumps with SIMD
 
-Random forests are generically the most degenerate case in terms of computation performance when it comes to prediction time.
+Random forests are often the most degenerate case in terms of computation performance when it comes to prediction time.
 We have to traverse the trees, comparing various predictors against split values, until we come to a terminal node and output
 its value.  It involves branching, has poor cache performance, and is practically unoptimizable.
 

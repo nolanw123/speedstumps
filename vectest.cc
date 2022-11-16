@@ -8,7 +8,7 @@
 //
 // i.e. if we had some logic like:
 //
-// if(x[i] >= y[i]) {
+// if(x[i] <= y[i]) {
 //   v[i] = a[i];
 // } else {
 //   v[i] = b[i];
@@ -30,67 +30,71 @@
 // we can get an annotated dump like this:
 // objdump -d -M intel -S objs/opt/vectest.o  > vectest.asm
 //
-// some todo's:
-// - selectslow might be faster if we re-arranged the memory layout
-//   so that a,b,x,y,and res were all next to each other in chunks
-//   ie: a0,b0,x0,y0,res0,a1,b1,x1,y1,res1, etc
-//   then we'd just be striding through memory and everything would be in cache
-// - the same thing might apply to the selectf(2) functions, but then
-//   we'd maybe have to do them in groups of __m256's, which basically means
-//   a[0..7],b[0..7], etc
-//   also have to think about how to arrange things because we output the masks
-//   first and then do the selects
-//
 
 #include <stdint.h>
 #include <immintrin.h>
 #include <xmmintrin.h>
 
 #include <iostream>
+#include <random>
 
 #include "util.h"
 
-// 32-bit aligned a/b, mask, and results array, do selection for count (which must be a multiple of 8)
-void selectf(float *a, float *b, uint32_t *mask, float *res, size_t count)
+// 32-bit aligned a/b, and mask array, do selection for count (which must be a multiple of 8)
+float selectf(float *a, float *b, uint32_t *mask, size_t count)
 {
   __m256 *ap = (__m256*)a;
   __m256 *bp = (__m256*)b;
   __m256 *maskp = (__m256*)mask;
-  __m256 *resp  = (__m256*)res;
+  __m256 tot;
 
   for(size_t i = 0 ; i < (count >> 3) ; ++i) {
-    *resp++ = _mm256_blendv_ps(*ap++, *bp++, *maskp++);
+    __m256 res = _mm256_blendv_ps(*ap++, *bp++, *maskp++);
+    tot = _mm256_add_ps(tot, res); // vertically accumulate results
   }
+  tot = _mm256_hadd_ps(tot, tot); // now horizontally accumulate results
+  tot = _mm256_hadd_ps(tot, tot); // need to do 4x because hadd_ps works in pairs
+  tot = _mm256_hadd_ps(tot, tot);
+  tot = _mm256_hadd_ps(tot, tot);
+  
+  return VGBI<float, 0>(tot) / count;
 }
 
-// 32-bit aligned a/b, mask, and results array, do selection for count (which must be a multiple of 4)
-void selectf2(float *a, float *b, uint32_t *mask, float *res, size_t count)
+// 16-bit aligned a/b, mask, and results array, do selection for count (which must be a multiple of 4)
+float selectf2(float *a, float *b, uint32_t *mask, size_t count)
 {
   __m128 *ap = (__m128*)a;
   __m128 *bp = (__m128*)b;
   __m128 *maskp = (__m128*)mask;
-  __m128 *resp  = (__m128*)res;
+  __m128 tot;
 
   for(size_t i = 0 ; i < (count >> 2) ; ++i) {
-    *resp++ = _mm_blendv_ps(*ap++, *bp++, *maskp++);
+    __m128 res = _mm_blendv_ps(*ap++, *bp++, *maskp++);
+    tot = _mm_add_ps(tot, res); // vertically accumulate results
   }
+  tot = _mm_hadd_ps(tot, tot); // now horizontally accumulate results
+  tot = _mm_hadd_ps(tot, tot); // need to do 2x because hadd_ps works in pairs
+
+  return VGBI<float, 0>(tot) / count;  
 }
 
-// this is the traditional decision stump 
-void selectslow(float *a, float *b, float *x, float *y, float *res, size_t count)
+// this is the traditional (slow) decision stump evaluation function 
+float selectslow(float *a, float *b, float *x, float *y, size_t count)
 {
+  float total = 0.0;
   for(size_t i = 0 ; i < count ; ++i) {
-    if(a[i] >= b[i]) {
-      res[i] = x[i];
+    if(a[i] <= b[i]) {
+      total += x[i];
     } else {
-      res[i] = y[i];
+      total += y[i];
     }
   }
+  return total / count;
 }
 
 // An attempt to speed up selectslow by grouping the data to improve
 // cache access:
-//   ie: a0,b0,x0,y0,res0,a1,b1,x1,y1,res1, etc
+//   ie: a0,b0,x0,y0,a1,b1,x1,y1 etc
 //
 #pragma pack(push,1)
 //struct alignas(32) selectentry {
@@ -98,20 +102,22 @@ void selectslow(float *a, float *b, float *x, float *y, float *res, size_t count
 // 32 bytes in size, as well), results in about 4x slower performance, probably due to
 // memory bandwidth constraints
 struct selectentry {
-  float a,b,x,y,res;
+  float a,b,x,y;
 };
-static_assert(sizeof(selectentry) == 20, "Size of selectentry is not 20 bytes");
+static_assert(sizeof(selectentry) == 16, "Size of selectentry is not 16 bytes");
 #pragma pack(pop)
   
-void selectlessslow(selectentry *entries, size_t count)
+float selectlessslow(selectentry *entries, size_t count)
 {
+  float total = 0.0;
   for(size_t i = 0 ; i < count ; ++i) {    
-    if(entries[i].a >= entries[i].b) {
-      entries[i].res = entries[i].x;
+    if(entries[i].a <= entries[i].b) {
+      total += entries[i].x;
     } else {
-      entries[i].res = entries[i].y;
+      total += entries[i].y;
     }
   }
+  return total / count;
 }
 
 // 16-bit aligned a/b, mask, and results array, do selection for count (which must be a multiple of 4)
@@ -126,67 +132,90 @@ struct selectf2_2_entry {
 };
 static_assert(sizeof(selectf2_2_entry) == 48, "Size of selectf2_2_entry is not 48 bytes");
 #pragma pack(pop)
-void selectf2_2(selectf2_2_entry *entries, __m128 *res, size_t count)
+
+float selectf2_2(selectf2_2_entry *entries, size_t count)
 {
+  __m128 tot;
+  
   for(size_t i = 0 ; i < (count >> 2) ; ++i) {
-    *res++ = _mm_blendv_ps(entries->a, entries->b, entries->mask);
+    __m128 res = _mm_blendv_ps(entries->a, entries->b, entries->mask);
+    tot = _mm_add_ps(tot, res); // vertically accumulate results    
     ++entries;
   }
+
+  tot = _mm_hadd_ps(tot, tot); // now horizontally accumulate results
+  tot = _mm_hadd_ps(tot, tot); // need to do 2x because hadd_ps works in pairs
+
+  return VGBI<float, 0>(tot) / count;  
 }
 
 int main(int argc, char **argv)
 {
   const size_t TRIALS = 200;
   
-  //  alignas(32) float a[16] = {1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16};
-  //  alignas(32) float b[16] = {16,15,14,13,12,11,10,9,8,7,6,5,4,3,2,1};
   const size_t COUNT = 8*100000;
-  __m256 *a = new __m256[COUNT/8];
-  __m256 *b = new __m256[COUNT/8];
-  for(size_t i = 0 ; i < COUNT ; ++i) {
-    a[i/8][i%8] = i;
-    b[i/8][i%8] = COUNT-i;    
-  }
+
   __m256 *mask = new __m256[COUNT/8]; //{ 0xffffffff,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0xffffffff};
   mask[0][0] = 0xffffffff;
   mask[5][0] = 0xffffffff;  
-  __m256 *res  = new __m256[COUNT/8];
-  //  alignas(32) float res[16];
 
   if(argv[1][0] == 'a') {
     mask[1][0] = 0xffffffff;
   }
 
+  __m256 *a = new __m256[COUNT/8];
+  __m256 *b = new __m256[COUNT/8];  
   __m256 *x = new __m256[COUNT/8];
   __m256 *y = new __m256[COUNT/8];
-
   selectentry *entries = new selectentry[COUNT];
   selectf2_2_entry *entries2 = new selectf2_2_entry[COUNT/4]; // /4 because using __m128 internally
-  
+
+  std::mt19937_64 g(1234);      // mersenne twister with constant seed for reproducibility
+  std::uniform_real_distribution<float> d(-0.1, 0.1);
+  for(size_t i = 0 ; i < COUNT/8 ; ++i) {
+    {
+      float vals[8] = { d(g), d(g), d(g), d(g), d(g), d(g), d(g), d(g) };
+      a[i] = _mm256_set_ps(vals[0], vals[1], vals[2], vals[3], vals[4], vals[5], vals[6], vals[7]);
+      for(size_t j = 0 ; j < 8 ; ++j) entries[(i * 8) + j].a = vals[j];
+    }
+    {
+      float vals[8] = { d(g), d(g), d(g), d(g), d(g), d(g), d(g), d(g) };
+      b[i] = _mm256_set_ps(vals[0], vals[1], vals[2], vals[3], vals[4], vals[5], vals[6], vals[7]);
+      for(size_t j = 0 ; j < 8 ; ++j) entries[(i * 8) + j].b = vals[j];
+    }
+    {
+      float vals[8] = { d(g), d(g), d(g), d(g), d(g), d(g), d(g), d(g) };
+      x[i] = _mm256_set_ps(vals[0], vals[1], vals[2], vals[3], vals[4], vals[5], vals[6], vals[7]);
+      for(size_t j = 0 ; j < 8 ; ++j) entries[(i * 8) + j].x = vals[j];
+    }
+    {
+      float vals[8] = { d(g), d(g), d(g), d(g), d(g), d(g), d(g), d(g) };
+      y[i] = _mm256_set_ps(vals[0], vals[1], vals[2], vals[3], vals[4], vals[5], vals[6], vals[7]);
+      for(size_t j = 0 ; j < 8 ; ++j) entries[(i * 8) + j].y = vals[j];
+    }    
+  }
+    
   std::cout << "Running tests on " << COUNT << " elements" << std::endl;
 
   auto timer = []<typename FUNC>(FUNC f_, size_t trials_, const std::string &name_) {
     int64_t start,end;
     double total = 0.0;
+    double val = 0.0;
     for(size_t trial = 0 ; trial < trials_ ; ++trial) {
       start = get_ts();
-      f_();
+      val = f_();
       end = get_ts();
       total += (end - start);
     }
     total /= trials_;
-    std::cout << (uint64_t)total << " nanos/trial (" << trials_ << " trials) for " << name_ << std::endl;
+    std::cout << (uint64_t)total << " nanos/trial (" << trials_ << " trials) for " << name_ << " (val=" << val << ")" << std::endl;
   };
 
-  timer([&](){ selectf(&a[0][0],&b[0][0],(uint32_t*)(&mask[0][0]),&res[0][0],COUNT); }, TRIALS, "selectf");
-  timer([&](){ selectslow(&a[0][0],&b[0][0],&x[0][0],&y[0][0],&res[0][0],COUNT); }, TRIALS, "selectslow");
-  timer([&](){ selectlessslow(&entries[0],COUNT); }, TRIALS, "selectlessslow");  
-  timer([&](){ selectf2(&a[0][0],&b[0][0],(uint32_t*)(&mask[0][0]),&res[0][0],COUNT); }, TRIALS, "selectf2");
-  timer([&](){ selectf2_2(&entries2[0],(__m128*)(&res[0][0]),COUNT); }, TRIALS, "selectf2_2");
+  timer([&](){ return selectslow(&a[0][0],&b[0][0],&x[0][0],&y[0][0],COUNT); }, TRIALS, "selectslow");
+  timer([&](){ return selectlessslow(&entries[0],COUNT); }, TRIALS, "selectlessslow");    
+  timer([&](){ return selectf(&a[0][0],&b[0][0],(uint32_t*)(&mask[0][0]),COUNT); }, TRIALS, "selectf");
+  timer([&](){ return selectf2(&a[0][0],&b[0][0],(uint32_t*)(&mask[0][0]),COUNT); }, TRIALS, "selectf2");
+  timer([&](){ return selectf2_2(&entries2[0],COUNT); }, TRIALS, "selectf2_2");
 
-  float sum = 0;
-  for(size_t i = 0 ; i < COUNT; ++i) {
-    sum += res[COUNT/8][COUNT%8];
-  }
-  return sum; // 'a' should == 149, 'b' == 136
+  return 0;
 }

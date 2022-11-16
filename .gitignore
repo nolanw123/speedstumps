@@ -1,4 +1,4 @@
 *~
-*/exec/*
-*/objs/*
-*/lib/*
+exec/
+objs/
+lib/

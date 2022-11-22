@@ -31,9 +31,6 @@
 //
 // Since we have 8 lanes and only use 4, this means we can evaluate two trees at once.
 //
-// It's possible there is a terminal node, in which case we could replicate the parent node
-// (since if we visit the terminal node, the parent condition must have evaluated to true)
-//
 // This implies we should store the trees differently than the way they are usually stored.
 // It would be best to store a,b,c,d and 1,2,3,4 all in the same structure.
 //
@@ -62,7 +59,7 @@ struct node
 };
 
 typedef std::vector<node> tree;
-std::vector<tree *> forest;
+std::vector<tree> forest;
 
 double tree_eval(const tree &t_, const std::vector<float> &x_)
 {
@@ -90,16 +87,16 @@ double tree_eval(const tree &t_, const std::vector<float> &x_)
   return t_[nodeID].splitValue;
 }
 
-double rf_eval(const std::vector<tree *> &f_, const std::vector<float> &x_)
+double rf_eval(const std::vector<tree> &f_, const std::vector<float> &x_)
 {
   double total = 0.0;
   for(const auto &t : f_) {
-    total += tree_eval(*t, x_);
+    total += tree_eval(t, x_);
   }
   return total / f_.size();
 }
 
-// pack entire tree into structure
+// pack entire tree into structure for the SIMD version
 struct tree2 {
   uint32_t a_splitVarID, c_splitVarID, e_splitVarID;
   float b_splitValue, d_splitValue, f_splitValue;
@@ -167,21 +164,6 @@ double rf_eval_simd(const std::vector<tree2> &f_, const std::vector<float> &x_)
   return total / f_.size();;
 }
 
-void compare_rfs(const std::vector<tree *> &f_, const std::vector<tree2> &f2_, const std::vector<float> &x_)
-{
-  double eps = 0.0000001;
-  size_t count = f_.size() / 2;
-  for(size_t i = 0 ; i < count ; i++) {
-    double v1_f1 = tree_eval(*f_[i*2 + 0], x_);
-    double v2_f1 = tree_eval(*f_[i*2 + 1], x_);
-    double vtot_f2 = tree_eval_simd(f2_[i*2 + 0], f2_[i*2 + 1], x_);
-
-    if(fabs((v1_f1 + v2_f1) - vtot_f2) > eps) {
-      std::abort();
-    }
-  }
-}
-
 int main(int argc, char **argv)
 {
   const size_t TRIALS = 200;
@@ -193,14 +175,14 @@ int main(int argc, char **argv)
   
   // build a forest with trees of depth 2
   for(size_t t = 0 ; t < NUM_TREES ; ++t) {
-    auto *treep = new tree;
-    treep->push_back({1, 2, g() % NUM_PREDS, d(g) }); // node 0
-    treep->push_back({3, 4, g() % NUM_PREDS, d(g) }); // node 1
-    treep->push_back({5, 6, g() % NUM_PREDS, d(g) }); // node 2
-    treep->push_back({0, 0, 0, d(g) }); // terminal node 3
-    treep->push_back({0, 0, 0, d(g) }); // terminal node 4
-    treep->push_back({0, 0, 0, d(g) }); // terminal node 5
-    treep->push_back({0, 0, 0, d(g) }); // terminal node 6    
+    tree treep;;
+    treep.push_back({1, 2, g() % NUM_PREDS, d(g) }); // node 0
+    treep.push_back({3, 4, g() % NUM_PREDS, d(g) }); // node 1
+    treep.push_back({5, 6, g() % NUM_PREDS, d(g) }); // node 2
+    treep.push_back({0, 0, 0, d(g) }); // terminal node 3
+    treep.push_back({0, 0, 0, d(g) }); // terminal node 4
+    treep.push_back({0, 0, 0, d(g) }); // terminal node 5
+    treep.push_back({0, 0, 0, d(g) }); // terminal node 6    
     forest.push_back(treep);
   }
 
@@ -213,7 +195,7 @@ int main(int argc, char **argv)
   // now, restructure the tree so we can evaluate it with SIMD
   // build a forest with trees of depth 2
   for(size_t t = 0 ; t < NUM_TREES ; ++t) {
-    const auto &treep = *(forest[t]);
+    const auto &treep = forest[t];
 
     tree2 tt = { treep[0].splitVarID, treep[1].splitVarID, treep[2].splitVarID,
 		treep[0].splitValue, treep[1].splitValue, treep[2].splitValue,
@@ -238,9 +220,6 @@ int main(int argc, char **argv)
     std::cout << (uint64_t)total << " nanos/trial (" << trials_ << " trials) for " << name_ << " (val=" << val << ")" << std::endl;
   };
 
-  // sanity check
-  compare_rfs(forest, forest2, x);
-  
   timer([&](){ return rf_eval(forest, x); }, TRIALS, "rf_eval");
 
   timer([&](){ return rf_eval_simd(forest2, x); }, TRIALS, "rf_eval_simd");

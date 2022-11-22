@@ -22,9 +22,9 @@
 //  <=
 // bbaa
 //  && 
-// cedf
+// cdef
 //  <=
-// dfce
+// dcfe
 //
 // So, we have two sets of comparisons that generate masks, and at the end
 // we take the bitwise && of the two masks -- only one possibility will be 1.
@@ -128,22 +128,22 @@ inline double tree_eval_simd(const tree2 &t1_, const tree2 &t2_, const std::vect
 			      x_[t2_.a_splitVarID],
 			      x_[t2_.a_splitVarID]);
   __m256 cmpres1 = _mm256_cmp_ps(cmp1, cmp2, 18); // <= 
-  
+
   cmp1 = _mm256_set_ps(x_[t1_.c_splitVarID],
+		       t1_.d_splitValue,		      
 		       x_[t1_.e_splitVarID],
-		       t1_.d_splitValue,
 		       t1_.f_splitValue,
 		       x_[t2_.c_splitVarID],
+		       t2_.d_splitValue,		       
 		       x_[t2_.e_splitVarID],
-		       t2_.d_splitValue,
 		       t2_.f_splitValue);
   cmp2 = _mm256_set_ps(t1_.d_splitValue,
+		       x_[t1_.c_splitVarID],		       
 		       t1_.f_splitValue,
-		       x_[t1_.c_splitVarID],
 		       x_[t1_.e_splitVarID],
 		       t2_.d_splitValue,
+		       x_[t2_.c_splitVarID],		       
 		       t2_.f_splitValue,
-		       x_[t2_.c_splitVarID],
 		       x_[t2_.e_splitVarID]);
 
   __m256 cmpres2 = _mm256_cmp_ps(cmp1, cmp2, 18); // <=
@@ -164,7 +164,22 @@ double rf_eval_simd(const std::vector<tree2> &f_, const std::vector<float> &x_)
   for(size_t i = 0 ; i < count ; i++) {
     total += tree_eval_simd(f_[i*2 + 0], f_[i*2 + 1], x_);
   }
-  return total / count;
+  return total / f_.size();;
+}
+
+void compare_rfs(const std::vector<tree *> &f_, const std::vector<tree2> &f2_, const std::vector<float> &x_)
+{
+  double eps = 0.0000001;
+  size_t count = f_.size() / 2;
+  for(size_t i = 0 ; i < count ; i++) {
+    double v1_f1 = tree_eval(*f_[i*2 + 0], x_);
+    double v2_f1 = tree_eval(*f_[i*2 + 1], x_);
+    double vtot_f2 = tree_eval_simd(f2_[i*2 + 0], f2_[i*2 + 1], x_);
+
+    if(fabs((v1_f1 + v2_f1) - vtot_f2) > eps) {
+      std::abort();
+    }
+  }
 }
 
 int main(int argc, char **argv)
@@ -194,7 +209,19 @@ int main(int argc, char **argv)
   for(size_t i = 0 ; i < NUM_PREDS ; ++i) {
     x[i] = d(g);
   }
-    
+
+  // now, restructure the tree so we can evaluate it with SIMD
+  // build a forest with trees of depth 2
+  for(size_t t = 0 ; t < NUM_TREES ; ++t) {
+    const auto &treep = *(forest[t]);
+
+    tree2 tt = { treep[0].splitVarID, treep[1].splitVarID, treep[2].splitVarID,
+		treep[0].splitValue, treep[1].splitValue, treep[2].splitValue,
+		treep[3].splitValue, treep[4].splitValue, treep[5].splitValue, treep[6].splitValue };
+
+    forest2.push_back(tt);
+  }
+  
   std::cout << "Running " << TRIALS << " trials on forest with " << NUM_TREES << " trees of depth=2" << std::endl;
 
   auto timer = []<typename FUNC>(FUNC f_, size_t trials_, const std::string &name_) {
@@ -211,19 +238,10 @@ int main(int argc, char **argv)
     std::cout << (uint64_t)total << " nanos/trial (" << trials_ << " trials) for " << name_ << " (val=" << val << ")" << std::endl;
   };
 
+  // sanity check
+  compare_rfs(forest, forest2, x);
+  
   timer([&](){ return rf_eval(forest, x); }, TRIALS, "rf_eval");
-
-  // now, restructure the tree so we can evaluate it with SIMD
-  // build a forest with trees of depth 2
-  for(size_t t = 0 ; t < NUM_TREES ; ++t) {
-    const auto &treep = *(forest[t]);
-
-    tree2 tt = { treep[0].splitVarID, treep[1].splitVarID, treep[2].splitVarID,
-		treep[0].splitValue, treep[1].splitValue, treep[2].splitValue,
-		treep[3].splitValue, treep[4].splitValue, treep[5].splitValue, treep[6].splitValue };
-
-    forest2.push_back(tt);
-  }
 
   timer([&](){ return rf_eval_simd(forest2, x); }, TRIALS, "rf_eval_simd");
   

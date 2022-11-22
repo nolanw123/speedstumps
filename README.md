@@ -55,5 +55,51 @@ Running tests on 800000 elements
 
 Given that the theoretical max bandwith increase we could achieve is 8x (256 bits / 32 bits per float) a value over 6x seems reasonable.  Since each core has SIMD units, theoretically evaluating groups of stumps in parallel should further boost evaluation throughput.
 
-Note that it is likely possible to take a similar approach to depth=2 trees, at the expense of bandwidth -- the benefit being of more complex
-models being useable.
+# But Can We Do It For Trees w/Depth=2?
+
+As it turns out, yes!
+
+Similar to gpu programming we can imagine branches being "shut off" if they are not selected.
+Imagine we do a `_mm256_cmp_ps`, this gives us 8 floating point lanes.
+There are 4 possible outcomes from a 2-level decision tree.
+Let's say the tree looks like this:
+
+```
+         a <= b
+        /      \
+      c <= d  e <= f
+       /  \    /  \
+      1    2  3    4
+```
+
+If we stack the comparisons vertically, we could do the following:
+
+```
+   aabb
+    <=
+   bbaa
+    && 
+   cdef
+    <=
+   dcfe
+```
+
+So, we have two sets of comparisons that generate masks, and at the end
+we take the bitwise && of the two masks -- only one possibility will be 1.
+
+Since we have 8 lanes and only use 4, this means we can evaluate two trees at once.
+
+This implies we should store the trees differently than the way they are usually stored.
+It would be best to store a,b,c,d and 1,2,3,4 all in the same structure.
+
+If we build the vectest2 program, which compares a traditional random forest storage/evaluation loop
+with our SIMD version, we get a little over 2x speedup:
+
+```
+nolanw@Adrenalin ~/speedstumps (depth2) $ ./exec/opt/vectest2
+Running 200 trials on forest with 500000 trees of depth=2
+13987547 nanos/trial (200 trials) for rf_eval (val=7.81268e-05)
+5467814 nanos/trial (200 trials) for rf_eval_simd (val=7.81268e-05)
+```
+
+Which is pretty much what we'd hope for.

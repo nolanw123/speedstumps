@@ -53,63 +53,6 @@ inline float horizontal_add(__m256 &a) {
   return _mm_cvtss_f32(t1);
 }
 
-inline float horizontal_add(__m128 &a) {
-  a = _mm_hadd_ps(a,a);
-  a = _mm_hadd_ps(a,a);
-  return _mm_cvtss_f32(a);
-}
-
-// 256-bit simd implementation
-float selectf(float *a, float *b, float *x, float *y, size_t count)
-{
-  __m256 *ap = (__m256*)a;
-  __m256 *bp = (__m256*)b;
-  __m256 *xp = (__m256*)x;
-  __m256 *yp = (__m256*)y;  
-  __m256 tot = _mm256_setzero_ps();
-
-  for(size_t i = 0 ; i < (count >> 3) ; ++i) {
-    __m256 mask = _mm256_cmp_ps(*ap++, *bp++, 30); // _CMP_GT_OQ aka > (ie the OPPOSITE of <= because we want an inverse result in the mask)
-    __m256 res = _mm256_blendv_ps(*xp++, *yp++, mask);
-    tot = _mm256_add_ps(tot, res); // vertically accumulate results
-  }
-  
-  return horizontal_add(tot) / count;
-}
-
-// 128-bit simd implementation
-float selectf2(float *a, float *b, float *x, float *y, size_t count)
-{
-  __m128 *ap = (__m128*)a;
-  __m128 *bp = (__m128*)b;
-  __m128 *xp = (__m128*)x;
-  __m128 *yp = (__m128*)y;  
-  __m128 tot = _mm_setzero_ps();
-
-  for(size_t i = 0 ; i < (count >> 2) ; ++i) {
-    __m128 mask = _mm_cmp_ps(*ap++, *bp++, 30); // _CMP_GT_OQ aka > (ie the OPPOSITE of <= because we want an inverse result in the mask)
-    __m128 res = _mm_blendv_ps(*xp++, *yp++, mask);
-    tot = _mm_add_ps(tot, res); // vertically accumulate results
-  }
-  
-  return horizontal_add(tot) / count;
-  
-}
-
-// this is the traditional (slow) decision stump evaluation function 
-float selectslow(float *a, float *b, float *x, float *y, size_t count)
-{
-  float total = 0.0;
-  for(size_t i = 0 ; i < count ; ++i) {
-    if(a[i] <= b[i]) {
-      total += x[i];
-    } else {
-      total += y[i];
-    }
-  }
-  return total / count;
-}
-
 struct node
 {
   uint64_t leftChildNodeID;
@@ -154,6 +97,74 @@ double rf_eval(const std::vector<tree *> &f_, const std::vector<float> &x_)
     total += tree_eval(*t, x_);
   }
   return total / f_.size();
+}
+
+// pack entire tree into structure
+struct tree2 {
+  uint32_t a_splitVarID, c_splitVarID, e_splitVarID;
+  float b_splitValue, d_splitValue, f_splitValue;
+  float one, two, three, four;
+};
+
+std::vector<tree2> forest2;
+
+inline double tree_eval_simd(const tree2 &t1_, const tree2 &t2_, const std::vector<float> &x_)
+{
+  __m256 cmp1 = _mm256_set_ps(x_[t1_.a_splitVarID],
+			      x_[t1_.a_splitVarID],
+			      t1_.b_splitValue,
+			      t1_.b_splitValue,
+			      x_[t2_.a_splitVarID],
+			      x_[t2_.a_splitVarID],
+			      t2_.b_splitValue,
+			      t2_.b_splitValue);
+  // note we could probably achieve this with a shuffle
+  __m256 cmp2 = _mm256_set_ps(t1_.b_splitValue,
+			      t1_.b_splitValue,
+			      x_[t1_.a_splitVarID],
+			      x_[t1_.a_splitVarID],
+			      t2_.b_splitValue,
+			      t2_.b_splitValue,
+			      x_[t2_.a_splitVarID],
+			      x_[t2_.a_splitVarID]);
+  __m256 cmpres1 = _mm256_cmp_ps(cmp1, cmp2, 18); // <= 
+  
+  cmp1 = _mm256_set_ps(x_[t1_.c_splitVarID],
+		       x_[t1_.e_splitVarID],
+		       t1_.d_splitValue,
+		       t1_.f_splitValue,
+		       x_[t2_.c_splitVarID],
+		       x_[t2_.e_splitVarID],
+		       t2_.d_splitValue,
+		       t2_.f_splitValue);
+  cmp2 = _mm256_set_ps(t1_.d_splitValue,
+		       t1_.f_splitValue,
+		       x_[t1_.c_splitVarID],
+		       x_[t1_.e_splitVarID],
+		       t2_.d_splitValue,
+		       t2_.f_splitValue,
+		       x_[t2_.c_splitVarID],
+		       x_[t2_.e_splitVarID]);
+
+  __m256 cmpres2 = _mm256_cmp_ps(cmp1, cmp2, 18); // <=
+
+  __m256i mask = _mm256_and_si256((__m256i)cmpres1, (__m256i)cmpres2);
+  __m256 res1 = _mm256_set_ps(t1_.one, t1_.two, t1_.three, t1_.four,
+			     t2_.one, t2_.two, t2_.three, t2_.four);
+  __m256 res2 = _mm256_setzero_ps();
+  _mm256_maskstore_ps((float *)(&res2), mask, res1);
+  
+  return horizontal_add(res2); // note: the SUM of the two trees!
+}
+
+double rf_eval_simd(const std::vector<tree2> &f_, const std::vector<float> &x_)
+{
+  double total = 0.0;
+  size_t count = f_.size() / 2;
+  for(size_t i = 0 ; i < count ; i++) {
+    total += tree_eval_simd(f_[i*2 + 0], f_[i*2 + 1], x_);
+  }
+  return total / count;
 }
 
 int main(int argc, char **argv)
@@ -202,5 +213,19 @@ int main(int argc, char **argv)
 
   timer([&](){ return rf_eval(forest, x); }, TRIALS, "rf_eval");
 
+  // now, restructure the tree so we can evaluate it with SIMD
+  // build a forest with trees of depth 2
+  for(size_t t = 0 ; t < NUM_TREES ; ++t) {
+    const auto &treep = *(forest[t]);
+
+    tree2 tt = { treep[0].splitVarID, treep[1].splitVarID, treep[2].splitVarID,
+		treep[0].splitValue, treep[1].splitValue, treep[2].splitValue,
+		treep[3].splitValue, treep[4].splitValue, treep[5].splitValue, treep[6].splitValue };
+
+    forest2.push_back(tt);
+  }
+
+  timer([&](){ return rf_eval_simd(forest2, x); }, TRIALS, "rf_eval_simd");
+  
   return 0;
 }
